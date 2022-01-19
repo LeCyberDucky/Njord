@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use njord::{gy521, utilites};
 use rppal::{gpio::Gpio, i2c::I2c, system::DeviceInfo};
 
@@ -53,19 +53,20 @@ fn main() -> Result<()> {
     sensor.initialize(&mut i2c)?;
     thread::sleep(Duration::SECOND); // Let stuff start up
 
-    let interrupt_timeout = 1.5 / sensor.sample_rate; // Timeout of more than one sampling period (in case of minor delay?), but less than two sampling periods
+    let interrupt_timeout = Duration::from_secs_f64(1.5 / sensor.sample_rate); // Timeout of more than one sampling period (in case of minor delay?), but less than two sampling periods
 
     let mut led = Gpio::new()?.get(GPIO_LED)?.into_output();
     let mut blink_count = 0;
     let blink_period = Duration::from_millis(800);
 
     let memory_capacity = 10000;
-    let mut samples = utilites::Memory::new(memory_capacity);
+    let mut samples = utilites::Memory::<(gy521::SensorSample, Instant)>::new(memory_capacity);
     let mut errors = utilites::Memory::new(memory_capacity);
 
     println!("Blinking an LED on a {}.", DeviceInfo::new()?.model());
     println!("I2C clock frequency: {} Hz", i2c.clock_speed().unwrap());
 
+    let sampling_period = Duration::from_millis(20); // Time between stored samples
     let sampling_begin = std::time::SystemTime::now();
     let clock = Instant::now();
     loop {
@@ -73,34 +74,28 @@ fn main() -> Result<()> {
             break;
         }
 
-        let interrupt = sensor
-            .wait_for_interrupt(
-                &mut i2c,
-                true,
-                Some(Duration::from_secs_f64(interrupt_timeout)),
-            )
-            .context("Cannot poll for interrupt.");
+        let (sample, sampling_instant) = sensor.wait_for_sample(&mut i2c, Some(interrupt_timeout));
 
-        match interrupt {
-            Ok(interrupt) => {
-                if let Some(interrupt_status) = interrupt {
-                    if interrupt_status.data_ready {
-                        let sampling_instant = clock.elapsed();
-                        let sample = sensor.read(&i2c).context("Unable to read sensors.");
-                        match sample {
-                            Ok(sample) => {
-                                samples.push((sample, sampling_begin + sampling_instant));
-                            }
-                            Err(error) => {
-                                errors.push((error, sampling_begin + sampling_instant));
-                            }
+        match sample {
+            Ok(sample) => {
+                if let Some(sample) = sample {
+                    let id = samples.len();
+                    if id > 0 {
+                        if sampling_instant.duration_since(samples[id - 1].1) >= sampling_period {
+                            samples.push((sample, sampling_instant));
                         }
+                    } else {
+                        samples.push((sample, sampling_instant));
                     }
+                    // if id > 0 && sampling_instant.duration_since(samples[id - 1].1) >= sampling_period {
+                    //     samples.push((sample, sampling_instant));
+                    // }
+
+                    // samples.push((sample, sampling_instant));
                 }
             }
             Err(error) => {
-                // Occasinally, what seems to be instabillity in the I2C connection, will cause an error. We record the error and try again. Tja, kannste machen nix ¯\_(ツ)_/¯
-                errors.push((error, sampling_begin + clock.elapsed()));
+                errors.push((error, sampling_instant));
             }
         }
 
@@ -123,15 +118,29 @@ fn main() -> Result<()> {
     led.set_low();
     sensor.sleep(&mut i2c)?;
 
+    println!("Writing data.");
+
     let data_file = std::fs::File::create("Data/Data.yaml")?;
-    serde_yaml::to_writer(data_file, &samples.data)?;
+    serde_yaml::to_writer(
+        data_file,
+        &samples
+            .data
+            .iter()
+            .map(|(sample, instant)| (sample, sampling_begin + instant.duration_since(clock)))
+            .collect::<Vec<_>>(),
+    )?;
     let error_file = std::fs::File::create("Data/Errors.yaml")?;
     serde_yaml::to_writer(
         error_file,
         &errors
             .data
             .iter()
-            .map(|(error, time)| (error.to_string(), time))
+            .map(|(error, instant)| {
+                (
+                    error.to_string(),
+                    sampling_begin + instant.duration_since(clock),
+                )
+            })
             .collect::<Vec<_>>(),
     )?;
 

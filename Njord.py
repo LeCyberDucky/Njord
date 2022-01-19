@@ -2,7 +2,7 @@ import yaml
 import pandas as pd
 import matplotlib.pyplot as plt
 
-with open("data.yaml", "r") as stream:
+with open("Data/Data.yaml", "r") as stream:
     data_nested = yaml.safe_load(stream)
 
 data = []
@@ -20,10 +20,10 @@ data.drop(["secs_since_epoch", "nanos_since_epoch"], axis = "columns")
 plt.plot(data["time"], data["acceleration.z"])
 
 
+plt.plot(data["time"], data["acceleration.z"] - data["acceleration.z"].mean())
 
 
-
-
+plt.plot(data["time"], data["temperature"])
 
 
 

@@ -1,8 +1,7 @@
-use std::ops::RangeInclusive;
+use std::{ops::RangeInclusive, time::Instant};
 
 use anyhow::{Context, Result};
 use rppal::i2c::I2c;
-// use serde::Serialize;
 
 use crate::math::Vec3D;
 
@@ -228,17 +227,17 @@ impl Default for SettingsRegisters {
 }
 
 pub struct DataRegisters {
-    accelerometer: std::ops::RangeInclusive<u8>,
-    thermometer: std::ops::RangeInclusive<u8>,
-    gyroscope: std::ops::RangeInclusive<u8>,
-    data_range: std::ops::RangeInclusive<u8>,
+    accelerometer: RangeInclusive<u8>,
+    thermometer: RangeInclusive<u8>,
+    gyroscope: RangeInclusive<u8>,
+    data_range: RangeInclusive<u8>,
 }
 
 impl DataRegisters {
     fn new(
-        accelerometer: std::ops::RangeInclusive<u8>,
-        thermometer: std::ops::RangeInclusive<u8>,
-        gyroscope: std::ops::RangeInclusive<u8>,
+        accelerometer: RangeInclusive<u8>,
+        thermometer: RangeInclusive<u8>,
+        gyroscope: RangeInclusive<u8>,
     ) -> Result<Self> {
         (*accelerometer.end() == *thermometer.start() - 1
             && *thermometer.end() == *gyroscope.start() - 1)
@@ -554,6 +553,9 @@ impl GY521 {
 
     pub fn calibrate(&mut self) {
         todo!();
+        // 1.: Collect data for a while
+
+        // 2.: Compute offsets
     }
 
     /// Set the power settings' clock source.
@@ -603,6 +605,32 @@ impl GY521 {
             }
             None => None, // Timeout waiting for interrupt, I think
         })
+    }
+
+    pub fn wait_for_sample(
+        &mut self,
+        i2c: &mut I2c,
+        timeout: Option<std::time::Duration>,
+    ) -> (Result<Option<SensorSample>>, Instant) {
+        let interrupt = self
+            .wait_for_interrupt(i2c, true, timeout)
+            .context("Cannot poll for interrupt.");
+
+        match interrupt {
+            Ok(interrupt) => match interrupt {
+                Some(interrupt_status) if interrupt_status.data_ready => {
+                    let sampling_instant = Instant::now();
+                    let sample = self.read(i2c).context("Unable to read sensors.");
+                    match sample {
+                        Ok(sample) => (Ok(Some(sample)), sampling_instant),
+                        Err(error) => (Err(error), sampling_instant),
+                    }
+                }
+                _ => (Ok(None), Instant::now()),
+            },
+            // Occasinally, what seems to be instabillity in the I2C connection, will cause an error. We record the error and try again. Tja, kannste machen nix ¯\_(ツ)_/¯
+            Err(error) => (Err(error), Instant::now()),
+        }
     }
 }
 
