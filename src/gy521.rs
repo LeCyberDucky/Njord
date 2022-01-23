@@ -1,19 +1,71 @@
-use std::{ops::RangeInclusive, time::Instant};
+use std::{
+    ops::{Add, AddAssign, Div, Neg, RangeInclusive},
+    time::Instant,
+};
 
 use anyhow::{Context, Result};
 use rppal::i2c::I2c;
 
-use crate::math::Vec3D;
+use crate::{math::Vec3D, utilites};
 
-#[derive(Debug, serde::Serialize)]
-pub struct SensorSample {
-    acceleration: Vec3D,
-    angular_velocity: Vec3D,
-    temperature: f64,
+#[allow(non_upper_case_globals)]
+const g: f64 = 9.80665; // [m/s^2] | Don't know which value of g the sensor has been calibrated with, so I'm using standard gravity: https://en.wikipedia.org/wiki/Gravity_of_Earth
+
+#[derive(Debug, serde::Serialize, Default, Clone, Copy)]
+pub struct SensorSample<V, T> {
+    acceleration: V,
+    angular_velocity: V,
+    temperature: T,
 }
 
-impl SensorSample {
-    pub fn new(acceleration: Vec3D, angular_velocity: Vec3D, temperature: f64) -> Self {
+impl<V: Add<Output = V>, T: Add<Output = T>> Add<SensorSample<V, T>> for SensorSample<V, T> {
+    type Output = Self;
+
+    fn add(self, rhs: SensorSample<V, T>) -> Self::Output {
+        Self::new(
+            self.acceleration + rhs.acceleration,
+            self.angular_velocity + rhs.angular_velocity,
+            self.temperature + rhs.temperature,
+        )
+    }
+}
+
+impl<V: AddAssign, T: AddAssign> AddAssign<SensorSample<V, T>> for SensorSample<V, T> {
+    fn add_assign(&mut self, rhs: SensorSample<V, T>) {
+        self.acceleration += rhs.acceleration;
+        self.angular_velocity += rhs.angular_velocity;
+        self.temperature += rhs.temperature;
+    }
+}
+
+impl<V: Neg<Output = V>, T: Neg<Output = T>> Neg for SensorSample<V, T> {
+    type Output = Self;
+
+    fn neg(self) -> Self::Output {
+        Self::new(
+            -self.acceleration,
+            -self.angular_velocity,
+            -self.temperature,
+        )
+    }
+}
+
+impl<R: Into<f64> + Copy, V: Div<f64, Output = V>, T: Div<f64, Output = T>> Div<R>
+    for SensorSample<V, T>
+{
+    type Output = Self;
+
+    fn div(self, rhs: R) -> Self::Output {
+        Self::new(
+            self.acceleration / rhs.into(),
+            self.angular_velocity / rhs.into(),
+            self.temperature / rhs.into(),
+        )
+    }
+}
+
+impl<V, T> SensorSample<V, T> {
+    pub fn new(acceleration: V, angular_velocity: V, temperature: T) -> Self {
         Self {
             acceleration,
             angular_velocity,
@@ -269,89 +321,141 @@ impl Default for DataRegisters {
     }
 }
 
-pub struct GyroscopeSensitivity {
+pub struct GyroscopeConfiguration {
     #[allow(dead_code)]
     range: RangeInclusive<isize>, // Full-Scale Range [degree/s]
-    scale_factor: f64, // Sensitivity Scale Factor [LSB/(degree/s)]
+    scale_factor: f64,         // Sensitivity Scale Factor [LSB/(degree/s)]
+    output_rate: f64,          // [Hz]
+    calibration_offset: Vec3D, // [egree/s]
 }
 
 #[allow(dead_code)]
-impl GyroscopeSensitivity {
-    // (Full-Scale Range, Sensitivity Scale Factor)
-    // (degree/s, LSB/(degree/s))
+impl GyroscopeConfiguration {
     pub const A: Self = Self {
         range: -250..=250,
         scale_factor: 131.0,
+        output_rate: 1e3,
+        calibration_offset: Vec3D {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
     };
     pub const B: Self = Self {
         range: -500..=500,
         scale_factor: 65.5,
+        output_rate: 1e3,
+        calibration_offset: Vec3D {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
     };
     pub const C: Self = Self {
         range: -1000..=1000,
         scale_factor: 32.8,
+        output_rate: 1e3,
+        calibration_offset: Vec3D {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
     };
     pub const D: Self = Self {
         range: -2000..=2000,
         scale_factor: 16.4,
+        output_rate: 1e3,
+        calibration_offset: Vec3D {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
     };
 }
 
-impl Default for GyroscopeSensitivity {
+impl Default for GyroscopeConfiguration {
     fn default() -> Self {
         Self::A
     }
 }
 
-pub struct AccelerometerSensitivity {
+pub struct AccelerometerConfiguration {
     #[allow(dead_code)]
     range: RangeInclusive<isize>, // Full-Scale Range [g]
-    scale_factor: usize, // Sensitivity Scale Factor [LSB/g]
+    scale_factor: usize,       // Sensitivity Scale Factor [LSB/g]
+    output_rate: f64,          // [Hz]
+    calibration_offset: Vec3D, // [g]
 }
 
 #[allow(dead_code)]
-impl AccelerometerSensitivity {
+impl AccelerometerConfiguration {
     pub const A: Self = Self {
         range: -2..=2,
         scale_factor: 16_384,
+        output_rate: 1e3,
+        calibration_offset: Vec3D {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
     };
     pub const B: Self = Self {
         range: -4..=4,
         scale_factor: 8_192,
+        output_rate: 1e3,
+        calibration_offset: Vec3D {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
     };
     pub const C: Self = Self {
         range: -8..=8,
         scale_factor: 4_096,
+        output_rate: 1e3,
+        calibration_offset: Vec3D {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
     };
     pub const D: Self = Self {
         range: -16..=16,
         scale_factor: 2_048,
+        output_rate: 1e3,
+        calibration_offset: Vec3D {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
     };
 }
 
-impl Default for AccelerometerSensitivity {
+impl Default for AccelerometerConfiguration {
     fn default() -> Self {
         Self::A
     }
 }
 
-pub struct ThermometerSensitivity {
+pub struct ThermometerConfiguration {
     #[allow(dead_code)]
     range: RangeInclusive<isize>, // [degree C]
     #[allow(dead_code)]
     sensitivity: usize, // [LSB/(degree C)]
     #[allow(dead_code)]
     offset: isize, // [LSB]
-    offset_celcius: f64, // [degree C]
+    offset_celcius: f64,     // [degree C]
+    calibration_offset: f64, // [degree C]
 }
 
-impl Default for ThermometerSensitivity {
+impl Default for ThermometerConfiguration {
     fn default() -> Self {
         Self {
             range: -40..=85,
             sensitivity: 340,
             offset: -521,
             offset_celcius: 36.53, // See section 4.18 in revision 4.2 of register map
+            calibration_offset: 0.0,
         }
     }
 }
@@ -367,12 +471,12 @@ pub struct GY521 {
     pub power_settings: PowerSettings,
     pub i2c_address: u16,
     pub i2c_data_access_rate: f64, // [Hz]
-    pub gyroscope_sensitivity: GyroscopeSensitivity,
-    pub accelerometer_sensitivity: AccelerometerSensitivity,
-    pub thermometer_sensitvity: ThermometerSensitivity,
-    pub gyroscope_output_rate: f64,     // [Hz]
-    pub accelerometer_output_rate: f64, // [Hz]
-    pub configuration: Configuration,   // Register 26
+    pub gyroscope_configuration: GyroscopeConfiguration,
+    pub accelerometer_configuration: AccelerometerConfiguration,
+    pub thermometer_configuration: ThermometerConfiguration,
+    // pub gyroscope_output_rate: f64,     // [Hz]
+    // pub accelerometer_output_rate: f64, // [Hz]
+    pub configuration: Configuration, // Register 26
     pub sample_rate_divider: u8, // Register 25: Used for determining sample rate: How often sensor samples should be output to the data registers, FIFO, or DMP. With a sample rate above the accelerometer output rate, the same accelerometer data will be output multiple times
     pub sample_rate: f64,        // [Hz]
     pub interrupt_configuration: InterruptConfiguration,
@@ -385,19 +489,19 @@ impl GY521 {
         power_settings: PowerSettings,
         i2c_address: u16,
         i2c_data_access_rate: f64,
-        gyroscope_sensitivity: GyroscopeSensitivity,
-        accelerometer_sensitivity: AccelerometerSensitivity,
-        thermometer_sensitvity: ThermometerSensitivity,
+        mut gyroscope_configuration: GyroscopeConfiguration,
+        accelerometer_configuration: AccelerometerConfiguration,
+        thermometer_configuration: ThermometerConfiguration,
         configuration: Configuration,
         sample_rate_divider: u8,
         interrupt_configuration: InterruptConfiguration,
     ) -> Self {
-        let gyroscope_output_rate = match configuration.filter {
+        gyroscope_configuration.output_rate = match configuration.filter {
             Filter::BwAc260HzBwGy256Hz | Filter::BwAc5HzBwGy5Hz => 8e3,
             _ => 1e3,
         };
 
-        let sample_rate = gyroscope_output_rate / (1.0 + sample_rate_divider as f64);
+        let sample_rate = gyroscope_configuration.output_rate / (1.0 + sample_rate_divider as f64);
 
         Self {
             data_registers,
@@ -405,10 +509,9 @@ impl GY521 {
             power_settings,
             i2c_address,
             i2c_data_access_rate,
-            gyroscope_sensitivity,
-            accelerometer_sensitivity,
-            thermometer_sensitvity,
-            gyroscope_output_rate,
+            gyroscope_configuration,
+            accelerometer_configuration,
+            thermometer_configuration,
             configuration,
             sample_rate_divider,
             sample_rate,
@@ -416,12 +519,11 @@ impl GY521 {
             acceleration: Default::default(),
             angular_velocity: Default::default(),
             temperature: Default::default(),
-            accelerometer_output_rate: 1e3,
         }
     }
 
     // Raw acceleration, temperature, and angular velocity readings shifted to be signed integer values
-    fn read_raw(&self, i2c: &I2c) -> Result<(Vec3D, i16, Vec3D)> {
+    fn read_raw(&self, i2c: &I2c) -> Result<SensorSample<[i16; 3], i16>> {
         fn concat_bytes(low: u8, high: u8) -> u16 {
             low as u16 | ((high as u16) << 8)
         }
@@ -439,11 +541,11 @@ impl GY521 {
 
         let acceleration = &data[*self.data_registers.accelerometer.start() as usize
             ..=*self.data_registers.accelerometer.end() as usize];
-        let acceleration = Vec3D::new(
+        let acceleration = [
             shift_to_signed(concat_bytes(acceleration[1], acceleration[0])),
             shift_to_signed(concat_bytes(acceleration[3], acceleration[2])),
             shift_to_signed(concat_bytes(acceleration[5], acceleration[4])),
-        );
+        ];
 
         let temperature = &data[*self.data_registers.thermometer.start() as usize
             ..=*self.data_registers.thermometer.end() as usize];
@@ -451,22 +553,42 @@ impl GY521 {
 
         let angular_velocity = &data[*self.data_registers.gyroscope.start() as usize
             ..=*self.data_registers.gyroscope.end() as usize];
-        let angular_velocity = Vec3D::new(
+        let angular_velocity = [
             shift_to_signed(concat_bytes(angular_velocity[1], angular_velocity[0])),
             shift_to_signed(concat_bytes(angular_velocity[3], angular_velocity[2])),
             shift_to_signed(concat_bytes(angular_velocity[5], angular_velocity[4])),
-        );
+        ];
 
-        Ok((acceleration, temperature, angular_velocity))
+        Ok(SensorSample::new(
+            acceleration,
+            angular_velocity,
+            temperature,
+        ))
     }
 
     // Reads (acceleration, temperature, angular_velocity)
-    pub fn read(&mut self, i2c: &I2c) -> Result<SensorSample> {
-        let (acceleration, temperature, angular_velocity) = self.read_raw(i2c)?;
-        self.acceleration = acceleration / self.accelerometer_sensitivity.scale_factor as f64;
-        self.temperature = temperature as f64 / self.thermometer_sensitvity.sensitivity as f64
-            + self.thermometer_sensitvity.offset_celcius; // See section 4.18 in revision 4.2 of register map
-        self.angular_velocity = angular_velocity / self.gyroscope_sensitivity.scale_factor as f64;
+    pub fn read(&mut self, i2c: &I2c) -> Result<SensorSample<Vec3D, f64>> {
+        let sample = self.read_raw(i2c)?;
+        let acceleration = Vec3D::new(
+            sample.acceleration[0],
+            sample.acceleration[1],
+            sample.acceleration[2],
+        );
+        self.acceleration = acceleration / self.accelerometer_configuration.scale_factor as f64
+            + self.accelerometer_configuration.calibration_offset;
+
+        let angular_velocity = Vec3D::new(
+            sample.angular_velocity[0],
+            sample.angular_velocity[1],
+            sample.angular_velocity[2],
+        );
+        self.angular_velocity = angular_velocity / self.gyroscope_configuration.scale_factor as f64
+            + self.gyroscope_configuration.calibration_offset;
+
+        self.temperature = sample.temperature as f64 / self.thermometer_configuration.sensitivity as f64
+            + self.thermometer_configuration.offset_celcius // See section 4.18 in revision 4.2 of register map
+            + self.thermometer_configuration.calibration_offset;
+
         Ok(SensorSample::new(
             self.acceleration,
             self.angular_velocity,
@@ -551,11 +673,94 @@ impl GY521 {
         Ok(())
     }
 
-    pub fn calibrate(&mut self) {
-        todo!();
+    /// Calculates calibration coefficients for acceleration and angular velocity based on {sample_size} samples.
+    /// Samples for a duration of {sampling_duration}, attempting to sample with a period of {sampling_period}.
+    /// Only the last {sample_size} samples are used.
+    /// Attempts to execute {status_action} once every {status_period}.
+    ///
+    /// Gyroscope output is expected to be 0 degrees/s for all axes under steady conditions.
+    /// Accelerometer output is exepcted to be 0g for the x-, and y-axes, and 1g for the z-axis.
+    /// The thermometer is not calibrated, because that can not be done simply by letting the sensor sit around in peace like for the other sensors.
+    pub fn calibrate<F>(
+        &mut self,
+        sample_size: usize,
+        sampling_period: std::time::Duration,
+        calibration_duration: std::time::Duration,
+        i2c: &mut I2c,
+        kill_signal: &crossbeam_channel::Receiver<()>,
+        status_period: std::time::Duration,
+        mut status_action: F,
+    ) where
+        F: FnMut(),
+    {
         // 1.: Collect data for a while
+        let interrupt_timeout = std::time::Duration::from_secs_f64(1.5 / self.sample_rate); // Timeout of more than one sampling period (in case of minor delay?), but less than two sampling periods
+
+        let mut samples = utilites::Memory::new(sample_size);
+        let mut errors = utilites::Memory::new(sample_size);
+
+        let mut sample_count = 0;
+        let mut status_count = 0;
+
+        let clock = Instant::now();
+        loop {
+            if kill_signal.try_recv().is_ok() {
+                break;
+            }
+
+            let (sample, sampling_instant) = self.wait_for_sample(i2c, Some(interrupt_timeout));
+
+            match sample {
+                Ok(sample) => {
+                    if let Some(sample) = sample {
+                        let id = samples.len();
+                        if id > 0 {
+                            // if sampling_instant.duration_since(samples[id - 1].1) >= sampling_period
+                            if sampling_instant.duration_since(clock).as_nanos()
+                                >= sample_count * sampling_period.as_nanos()
+                            {
+                                samples.push((sample, sampling_instant));
+                                sample_count += 1;
+                            }
+                        } else {
+                            samples.push((sample, sampling_instant));
+                        }
+                    }
+                }
+                Err(error) => {
+                    errors.push((error, sampling_instant));
+                }
+            }
+
+            if clock.elapsed().as_nanos() / status_period.as_nanos() >= status_count {
+                status_action();
+                status_count += 1;
+            }
+
+            if clock.elapsed() >= calibration_duration {
+                break; // Let's have a look at the samples
+            }
+        }
 
         // 2.: Compute offsets
+        let sum = samples.data.iter().fold(
+            SensorSample::<Vec3D, f64>::default(),
+            |sum, (sample, _time)| sum + *sample,
+        );
+
+        let mut offsets = -sum / samples.len() as f64;
+        println!("Offsets: {:#?}", offsets);
+        offsets.acceleration.z = 1.0 + offsets.acceleration.z; // 1g expected for z acceleration
+        self.gyroscope_configuration.calibration_offset += offsets.angular_velocity;
+        self.accelerometer_configuration.calibration_offset += offsets.acceleration;
+        println!(
+            "Gyroscope offsets: {:#?}",
+            self.gyroscope_configuration.calibration_offset
+        );
+        println!(
+            "Accelerometer offsets: {:#?}",
+            self.accelerometer_configuration.calibration_offset
+        );
     }
 
     /// Set the power settings' clock source.
@@ -611,7 +816,7 @@ impl GY521 {
         &mut self,
         i2c: &mut I2c,
         timeout: Option<std::time::Duration>,
-    ) -> (Result<Option<SensorSample>>, Instant) {
+    ) -> (Result<Option<SensorSample<Vec3D, f64>>>, Instant) {
         let interrupt = self
             .wait_for_interrupt(i2c, true, timeout)
             .context("Cannot poll for interrupt.");
